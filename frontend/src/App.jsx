@@ -1,5 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+} from 'react';
+
 import { useLocalStorage } from './hooks/useLocalStorage';
+
 import {
   CONNECTOR_LIST,
   PLUGIN_LIST,
@@ -12,23 +18,62 @@ import LoadingScreen from './components/LoadingScreen';
 import Login from './components/Login';
 import Register from './components/Register';
 
+
 // =========================================================
 // API CONFIG
 // =========================================================
 
-const API_BASE_URL =
+const API_BASE_URL = (
   import.meta.env.VITE_API_URL ||
-  'https://semitron-ai.onrender.com';
+  'https://semitron-ai.onrender.com'
+).replace(/\/$/, '');
+
+const TOKEN_KEY = 'auth_token';
+
 
 // =========================================================
-// HELPERS
+// FETCH WITH TIMEOUT
+// =========================================================
+
+const fetchWithTimeout = async (
+  url,
+  options = {},
+  timeout = 60000
+) => {
+  const controller = new AbortController();
+
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, timeout);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+
+    return response;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error(
+        'Server is taking too long to respond. Render may be waking up.'
+      );
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+
+// =========================================================
+// UNIQUE MESSAGE ID
 // =========================================================
 
 const uid = () =>
   Math.random().toString(36).slice(2) +
   Date.now().toString(36);
-
-const TOKEN_KEY = 'auth_token';
 
 
 // =========================================================
@@ -36,6 +81,11 @@ const TOKEN_KEY = 'auth_token';
 // =========================================================
 
 function App() {
+
+  // =======================================================
+  // STATE
+  // =======================================================
+
   const [isLoading, setIsLoading] = useState(true);
 
   const [token, setToken] = useLocalStorage(
@@ -83,10 +133,22 @@ function App() {
 
   const createNewConversation = useCallback(
     async () => {
-      if (!token) return null;
+
+      if (!token) {
+        console.warn(
+          'Cannot create conversation: No token'
+        );
+
+        return null;
+      }
 
       try {
-        const response = await fetch(
+
+        console.log(
+          'Creating new conversation...'
+        );
+
+        const response = await fetchWithTimeout(
           `${API_BASE_URL}/api/conversations?title=${encodeURIComponent(
             'New Chat'
           )}`,
@@ -99,24 +161,57 @@ function App() {
           }
         );
 
+        // -------------------------------------------------
+        // UNAUTHORIZED
+        // -------------------------------------------------
+
+        if (response.status === 401) {
+
+          console.warn(
+            'Token expired or invalid.'
+          );
+
+          setToken(null);
+          setConversations([]);
+          setActiveConversationId(null);
+
+          return null;
+        }
+
+
+        // -------------------------------------------------
+        // SERVER ERROR
+        // -------------------------------------------------
+
         if (!response.ok) {
-          const errorData = await response
-            .json()
-            .catch(() => ({}));
+
+          const errorData =
+            await response
+              .json()
+              .catch(() => ({}));
 
           console.error(
             'Create conversation failed:',
             errorData
           );
 
-          if (response.status === 401) {
-            setToken(null);
-          }
-
-          return null;
+          throw new Error(
+            errorData.detail ||
+            `Server error: ${response.status}`
+          );
         }
 
+
+        // -------------------------------------------------
+        // SUCCESS
+        // -------------------------------------------------
+
         const data = await response.json();
+
+        console.log(
+          'Conversation created:',
+          data
+        );
 
         const newConversation = {
           id: data.id,
@@ -134,7 +229,9 @@ function App() {
         );
 
         return newConversation;
+
       } catch (error) {
+
         console.error(
           'Error creating conversation:',
           error
@@ -152,150 +249,333 @@ function App() {
   // =======================================================
 
   useEffect(() => {
+
+    // -----------------------------------------------------
+    // NO TOKEN
+    // -----------------------------------------------------
+
     if (!token) {
+
       setConversations([]);
       setActiveConversationId(null);
       setIsLoading(false);
+
       return;
     }
 
+
     let cancelled = false;
 
-    const fetchConversations = async () => {
+
+    const loadConversations = async () => {
+
       try {
-        setIsLoading(true);
 
-        const response = await fetch(
-          `${API_BASE_URL}/api/conversations`,
-          {
-            method: 'GET',
-
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          }
+        console.log(
+          'Loading conversations from:',
+          API_BASE_URL
         );
 
+        setIsLoading(true);
+
+
+        // -------------------------------------------------
+        // FETCH CONVERSATIONS
+        // -------------------------------------------------
+
+        const response =
+          await fetchWithTimeout(
+            `${API_BASE_URL}/api/conversations`,
+            {
+              method: 'GET',
+
+              headers: {
+                Authorization:
+                  `Bearer ${token}`,
+              },
+            }
+          );
+
+
+        // -------------------------------------------------
+        // TOKEN INVALID
+        // -------------------------------------------------
+
         if (response.status === 401) {
-          setToken(null);
+
+          console.warn(
+            'Authentication expired.'
+          );
+
+          if (!cancelled) {
+
+            setToken(null);
+            setConversations([]);
+            setActiveConversationId(null);
+
+          }
+
           return;
         }
 
+
+        // -------------------------------------------------
+        // SERVER ERROR
+        // -------------------------------------------------
+
         if (!response.ok) {
+
+          const errorData =
+            await response
+              .json()
+              .catch(() => ({}));
+
           throw new Error(
-            `Failed to load conversations: ${response.status}`
+            errorData.detail ||
+            `Server error: ${response.status}`
           );
         }
 
-        const data = await response.json();
 
-        if (cancelled) return;
+        // -------------------------------------------------
+        // JSON
+        // -------------------------------------------------
 
-        const loadedConversations = (
-          data.conversations || []
-        ).map((conversation) => ({
-          ...conversation,
-          messages: [],
-        }));
+        const data =
+          await response.json();
+
+
+        if (cancelled) {
+          return;
+        }
+
+
+        // -------------------------------------------------
+        // CONVERSATIONS
+        // -------------------------------------------------
+
+        const loadedConversations =
+          (data.conversations || []).map(
+            (conversation) => ({
+              id: conversation.id,
+              title:
+                conversation.title ||
+                'New Chat',
+              messages: [],
+            })
+          );
+
+
+        console.log(
+          'Loaded conversations:',
+          loadedConversations
+        );
+
 
         setConversations(
           loadedConversations
         );
 
-        if (loadedConversations.length > 0) {
+
+        // -------------------------------------------------
+        // EXISTING CHAT
+        // -------------------------------------------------
+
+        if (
+          loadedConversations.length > 0
+        ) {
+
           setActiveConversationId(
             loadedConversations[0].id
           );
-        } else {
-          // Create first conversation
+
+        }
+
+        // -------------------------------------------------
+        // NO CHAT → CREATE FIRST CHAT
+        // -------------------------------------------------
+
+        else {
+
+          console.log(
+            'No conversations found. Creating first chat...'
+          );
+
           await createNewConversation();
         }
+
       } catch (error) {
+
         if (!cancelled) {
+
           console.error(
             'Error loading conversations:',
             error
           );
+
+          /*
+           * IMPORTANT:
+           * Don't keep the user stuck on loading screen.
+           */
+
+          setConversations([]);
+          setActiveConversationId(null);
         }
+
       } finally {
+
         if (!cancelled) {
+
           setIsLoading(false);
+
         }
       }
     };
 
-    fetchConversations();
+
+    loadConversations();
+
 
     return () => {
+
       cancelled = true;
+
     };
-  }, [token, createNewConversation, setToken]);
+
+  }, [
+    token,
+    createNewConversation,
+    setToken,
+  ]);
 
 
   // =======================================================
-  // FETCH MESSAGES FOR ACTIVE CONVERSATION
+  // LOAD MESSAGES
   // =======================================================
 
   useEffect(() => {
-    if (!token || !activeConversationId) {
+
+    if (
+      !token ||
+      !activeConversationId
+    ) {
       return;
     }
 
+
     let cancelled = false;
 
-    const fetchMessages = async () => {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/api/conversations/${activeConversationId}/messages`,
-          {
-            method: 'GET',
 
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          }
+    const loadMessages = async () => {
+
+      try {
+
+        console.log(
+          'Loading messages:',
+          activeConversationId
         );
 
+
+        const response =
+          await fetchWithTimeout(
+            `${API_BASE_URL}/api/conversations/${activeConversationId}/messages`,
+            {
+              method: 'GET',
+
+              headers: {
+                Authorization:
+                  `Bearer ${token}`,
+              },
+            }
+          );
+
+
+        // -------------------------------------------------
+        // UNAUTHORIZED
+        // -------------------------------------------------
+
         if (response.status === 401) {
-          setToken(null);
+
+          if (!cancelled) {
+
+            setToken(null);
+            setConversations([]);
+            setActiveConversationId(null);
+
+          }
+
           return;
         }
 
+
+        // -------------------------------------------------
+        // ERROR
+        // -------------------------------------------------
+
         if (!response.ok) {
+
+          const errorData =
+            await response
+              .json()
+              .catch(() => ({}));
+
           throw new Error(
-            `Failed to load messages: ${response.status}`
+            errorData.detail ||
+            `Server error: ${response.status}`
           );
         }
 
-        const data = await response.json();
 
-        if (cancelled) return;
+        const data =
+          await response.json();
+
+
+        if (cancelled) {
+          return;
+        }
+
+
+        // -------------------------------------------------
+        // UPDATE ACTIVE CHAT
+        // -------------------------------------------------
 
         setConversations((prev) =>
-          prev.map((conversation) =>
-            conversation.id === activeConversationId
-              ? {
-                  ...conversation,
-                  messages: data.messages || [],
-                }
-              : conversation
+          prev.map(
+            (conversation) =>
+              conversation.id ===
+              activeConversationId
+                ? {
+                    ...conversation,
+                    messages:
+                      data.messages || [],
+                  }
+                : conversation
           )
         );
+
       } catch (error) {
+
         if (!cancelled) {
+
           console.error(
             'Error fetching messages:',
             error
           );
+
         }
       }
     };
 
-    fetchMessages();
+
+    loadMessages();
+
 
     return () => {
+
       cancelled = true;
+
     };
+
   }, [
     token,
     activeConversationId,
@@ -308,32 +588,47 @@ function App() {
   // =======================================================
 
   const deleteConversation = async (id) => {
-    // NOTE:
-    // Current backend does not have a DELETE endpoint.
-    // So this removes the conversation from the UI only.
 
-    setConversations((prev) =>
-      prev.filter(
-        (conversation) =>
-          conversation.id !== id
-      )
+    console.log(
+      'Deleting conversation from UI:',
+      id
     );
 
-    if (activeConversationId === id) {
-      const remainingConversations =
-        conversations.filter(
-          (conversation) =>
-            conversation.id !== id
+
+    // -----------------------------------------------------
+    // BACKEND CURRENTLY DOES NOT HAVE DELETE ENDPOINT
+    // -----------------------------------------------------
+
+    const remaining =
+      conversations.filter(
+        (conversation) =>
+          conversation.id !== id
+      );
+
+
+    setConversations(remaining);
+
+
+    // -----------------------------------------------------
+    // DELETED ACTIVE CHAT
+    // -----------------------------------------------------
+
+    if (
+      activeConversationId === id
+    ) {
+
+      if (remaining.length > 0) {
+
+        setActiveConversationId(
+          remaining[0].id
         );
 
-      if (remainingConversations.length > 0) {
-        setActiveConversationId(
-          remainingConversations[0].id
-        );
       } else {
+
         setActiveConversationId(null);
 
         await createNewConversation();
+
       }
     }
   };
@@ -344,91 +639,220 @@ function App() {
   // =======================================================
 
   const sendMessage = async (content) => {
+
+    // -----------------------------------------------------
+    // VALIDATION
+    // -----------------------------------------------------
+
     if (
       !token ||
       !activeConversation ||
-      !content?.trim() ||
+      !content ||
+      !content.trim() ||
       isWaiting
     ) {
-      return;
-    }
 
-    const messageContent = content.trim();
-
-    setIsWaiting(true);
-
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/api/chat`,
+      console.warn(
+        'Message blocked:',
         {
-          method: 'POST',
-
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-
-          body: JSON.stringify({
-            message: messageContent,
-            conversation_id:
-              activeConversationId,
-          }),
+          hasToken: !!token,
+          hasConversation:
+            !!activeConversation,
+          isWaiting,
         }
       );
 
-      if (response.status === 401) {
-        setToken(null);
-        return;
-      }
+      return;
+    }
 
-      if (!response.ok) {
-        const errorData = await response
-          .json()
-          .catch(() => ({}));
 
-        throw new Error(
-          errorData.detail ||
-            'Failed to get AI response'
-        );
-      }
+    const messageContent =
+      content.trim();
 
-      const data = await response.json();
 
-      setConversations((prev) =>
-        prev.map((conversation) =>
+    setIsWaiting(true);
+
+
+    // -----------------------------------------------------
+    // SHOW USER MESSAGE IMMEDIATELY
+    // -----------------------------------------------------
+
+    const temporaryUserMessage = {
+      id: uid(),
+      role: 'user',
+      content: messageContent,
+    };
+
+
+    setConversations((prev) =>
+      prev.map(
+        (conversation) =>
           conversation.id ===
-          data.conversation_id
+          activeConversationId
             ? {
                 ...conversation,
-
                 messages: [
                   ...(conversation.messages || []),
-
-                  {
-                    id: uid(),
-                    role: 'user',
-                    content: messageContent,
-                  },
-
-                  {
-                    id: uid(),
-                    role: 'assistant',
-                    content:
-                      data.reply ||
-                      'No response received.',
-                  },
+                  temporaryUserMessage,
                 ],
               }
             : conversation
+      )
+    );
+
+
+    try {
+
+      console.log(
+        'Sending message to:',
+        `${API_BASE_URL}/api/chat`
+      );
+
+
+      // -------------------------------------------------
+      // API CALL
+      // -------------------------------------------------
+
+      const response =
+        await fetchWithTimeout(
+          `${API_BASE_URL}/api/chat`,
+          {
+            method: 'POST',
+
+            headers: {
+              'Content-Type':
+                'application/json',
+
+              Authorization:
+                `Bearer ${token}`,
+            },
+
+            body: JSON.stringify({
+              message: messageContent,
+              conversation_id:
+                activeConversationId,
+            }),
+          }
+        );
+
+
+      // -------------------------------------------------
+      // TOKEN EXPIRED
+      // -------------------------------------------------
+
+      if (response.status === 401) {
+
+        console.warn(
+          'Authentication expired.'
+        );
+
+        setToken(null);
+        setConversations([]);
+        setActiveConversationId(null);
+
+        return;
+      }
+
+
+      // -------------------------------------------------
+      // ERROR
+      // -------------------------------------------------
+
+      if (!response.ok) {
+
+        const errorData =
+          await response
+            .json()
+            .catch(() => ({}));
+
+        throw new Error(
+          errorData.detail ||
+          `AI request failed: ${response.status}`
+        );
+      }
+
+
+      // -------------------------------------------------
+      // SUCCESS
+      // -----------------------------------------------------
+
+      const data =
+        await response.json();
+
+
+      console.log(
+        'AI response:',
+        data
+      );
+
+
+      // -------------------------------------------------
+      // ADD ASSISTANT RESPONSE
+      // -----------------------------------------------------
+
+      setConversations((prev) =>
+        prev.map(
+          (conversation) =>
+            conversation.id ===
+            data.conversation_id
+              ? {
+                  ...conversation,
+
+                  messages: [
+                    ...(conversation.messages || []),
+
+                    {
+                      id: uid(),
+                      role: 'assistant',
+                      content:
+                        data.reply ||
+                        'No response received.',
+                    },
+                  ],
+                }
+              : conversation
         )
       );
+
     } catch (error) {
+
       console.error(
         'Error sending message:',
         error
       );
+
+
+      // -------------------------------------------------
+      // SHOW ERROR IN CHAT
+      // -----------------------------------------------------
+
+      setConversations((prev) =>
+        prev.map(
+          (conversation) =>
+            conversation.id ===
+            activeConversationId
+              ? {
+                  ...conversation,
+
+                  messages: [
+                    ...(conversation.messages || []),
+
+                    {
+                      id: uid(),
+                      role: 'assistant',
+                      content:
+                        `⚠️ ${error.message || 'Unable to connect to Semitron AI.'}`,
+                    },
+                  ],
+                }
+              : conversation
+        )
+      );
+
     } finally {
+
       setIsWaiting(false);
+
     }
   };
 
@@ -438,9 +862,15 @@ function App() {
   // =======================================================
 
   const handleLogin = (newToken) => {
+
+    console.log(
+      'Login successful.'
+    );
+
     setToken(newToken);
 
     setConversations([]);
+
     setActiveConversationId(null);
 
     setIsLoading(true);
@@ -452,6 +882,11 @@ function App() {
   // =======================================================
 
   const handleLogout = () => {
+
+    console.log(
+      'Logging out...'
+    );
+
     setToken(null);
 
     setConversations([]);
@@ -463,27 +898,37 @@ function App() {
 
 
   // =======================================================
-  // LOADING SCREEN
+  // LOADING
   // =======================================================
 
   if (isLoading) {
+
     return <LoadingScreen />;
+
   }
 
 
   // =======================================================
-  // AUTH SCREEN
+  // LOGIN / REGISTER
   // =======================================================
 
   if (!token) {
-    return showRegister ? (
-      <Register
-        onRegister={handleLogin}
-        onSwitchToLogin={() =>
-          setShowRegister(false)
-        }
-      />
-    ) : (
+
+    if (showRegister) {
+
+      return (
+        <Register
+          onRegister={handleLogin}
+          onSwitchToLogin={() =>
+            setShowRegister(false)
+          }
+        />
+      );
+
+    }
+
+
+    return (
       <Login
         onLogin={handleLogin}
         onSwitchToRegister={() =>
@@ -491,11 +936,12 @@ function App() {
         }
       />
     );
+
   }
 
 
   // =======================================================
-  // MAIN APP
+  // MAIN APPLICATION
   // =======================================================
 
   return (
@@ -504,37 +950,68 @@ function App() {
         isDarkMode ? 'dark' : ''
       }`}
     >
+
+      {/* =================================================
+          SIDEBAR
+      ================================================= */}
+
       <Sidebar
-        conversations={conversations}
-        activeId={activeConversationId}
 
-        onSelect={setActiveConversationId}
+        conversations={
+          conversations
+        }
 
-        onNew={createNewConversation}
+        activeId={
+          activeConversationId
+        }
 
-        onDelete={deleteConversation}
+        onSelect={
+          setActiveConversationId
+        }
 
-        isOpen={isSidebarOpen}
+        onNew={
+          createNewConversation
+        }
+
+        onDelete={
+          deleteConversation
+        }
+
+        isOpen={
+          isSidebarOpen
+        }
 
         toggleSidebar={() =>
           setIsSidebarOpen(
-            !isSidebarOpen
+            (prev) => !prev
           )
         }
 
-        logo={LOGO_URL}
-
-        isDarkMode={isDarkMode}
-
-        toggleDarkMode={() =>
-          setIsDarkMode(!isDarkMode)
+        logo={
+          LOGO_URL
         }
 
-        onLogout={handleLogout}
+        isDarkMode={
+          isDarkMode
+        }
 
-        connectors={CONNECTOR_LIST}
+        toggleDarkMode={() =>
+          setIsDarkMode(
+            (prev) => !prev
+          )
+        }
 
-        plugins={PLUGIN_LIST}
+        onLogout={
+          handleLogout
+        }
+
+        connectors={
+          CONNECTOR_LIST
+        }
+
+        plugins={
+          PLUGIN_LIST
+        }
 
         selectedConnectors={
           selectedConnectors
@@ -551,25 +1028,43 @@ function App() {
         setSelectedPlugins={
           setSelectedPlugins
         }
+
       />
 
+
+      {/* =================================================
+          CHAT AREA
+      ================================================= */}
+
       <ChatArea
-        conversation={activeConversation}
 
-        onSend={sendMessage}
+        conversation={
+          activeConversation
+        }
 
-        isSidebarOpen={isSidebarOpen}
+        onSend={
+          sendMessage
+        }
+
+        isSidebarOpen={
+          isSidebarOpen
+        }
 
         toggleSidebar={() =>
           setIsSidebarOpen(
-            !isSidebarOpen
+            (prev) => !prev
           )
         }
 
-        isWaiting={isWaiting}
+        isWaiting={
+          isWaiting
+        }
+
       />
+
     </div>
   );
 }
+
 
 export default App;
