@@ -5,9 +5,15 @@ const LoadingScreen = () => {
   return (
     <div className="loading-screen">
       <div className="loading-content">
-        <img src={LOGO_URL} alt="Logo" className="loading-logo" />
+        <img
+          src={LOGO_URL}
+          alt="Semitron Logo"
+          className="loading-logo"
+        />
+
         <div className="spinner"></div>
-        <p>Loading...</p>
+
+        <p>Loading Semitron...</p>
       </div>
     </div>
   );
