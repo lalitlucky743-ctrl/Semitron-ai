@@ -2,3 +2,6 @@ fastapi
 uvicorn
 python-multipart
 bcrypt
+python-jose[cryptography]  # ये JWT के लिए best practice है
+passlib[bcrypt]            # अगर password hashing में use कर रहे हो
+python-multipart 
