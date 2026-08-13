@@ -1,6 +1,10 @@
 import React, { useState } from 'react';
 import { LOGO_URL } from '../utils/constants';
 
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
+  'https://semitron-ai.onrender.com';
+
 const Login = ({ onLogin, onSwitchToRegister }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -9,24 +13,64 @@ const Login = ({ onLogin, onSwitchToRegister }) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
     setError('');
+
+    if (!username.trim()) {
+      setError('Please enter your username');
+      return;
+    }
+
+    if (!password) {
+      setError('Please enter your password');
+      return;
+    }
+
     setLoading(true);
+
     try {
-      const response = await fetch('http://localhost:8000/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ username, password }),
-      });
+      const response = await fetch(
+        `${API_BASE_URL}/api/login`,
+        {
+          method: 'POST',
+
+          headers: {
+            'Content-Type':
+              'application/x-www-form-urlencoded',
+          },
+
+          body: new URLSearchParams({
+            username: username.trim(),
+            password: password,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
       if (!response.ok) {
-        const data = await response.json();
-        setError(data.detail || 'Invalid credentials');
-        setLoading(false);
+        setError(
+          data.detail ||
+            'Invalid username or password'
+        );
         return;
       }
-      const data = await response.json();
+
+      if (!data.access_token) {
+        setError(
+          'Login failed: authentication token not received'
+        );
+        return;
+      }
+
       onLogin(data.access_token);
     } catch (err) {
-      setError('Network error. Please try again.');
+      console.error('Login error:', err);
+
+      setError(
+        'Network error. Please check your connection and try again.'
+      );
+    } finally {
       setLoading(false);
     }
   };
@@ -34,45 +78,102 @@ const Login = ({ onLogin, onSwitchToRegister }) => {
   return (
     <div className="auth-container">
       <div className="auth-box">
+
+        {/* Logo */}
         <div className="auth-logo">
-          <img src={LOGO_URL} alt="Logo" />
+          <img
+            src={LOGO_URL}
+            alt="Semitron Logo"
+          />
         </div>
+
+        {/* Heading */}
         <h2>Welcome back</h2>
-        <p className="auth-subtitle">Sign in to your account</p>
-        {error && <div className="auth-error">{error}</div>}
+
+        <p className="auth-subtitle">
+          Sign in to your account
+        </p>
+
+        {/* Error */}
+        {error && (
+          <div className="auth-error">
+            {error}
+          </div>
+        )}
+
+        {/* Login Form */}
         <form onSubmit={handleSubmit}>
+
+          {/* Username */}
           <div className="form-group">
-            <label>Username</label>
+            <label htmlFor="login-username">
+              Username
+            </label>
+
             <input
+              id="login-username"
               type="text"
               placeholder="Enter your username"
               value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              onChange={(e) =>
+                setUsername(e.target.value)
+              }
+              autoComplete="username"
               required
               disabled={loading}
             />
           </div>
+
+          {/* Password */}
           <div className="form-group">
-            <label>Password</label>
+            <label htmlFor="login-password">
+              Password
+            </label>
+
             <input
+              id="login-password"
               type="password"
               placeholder="Enter your password"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) =>
+                setPassword(e.target.value)
+              }
+              maxLength={72}
+              autoComplete="current-password"
               required
               disabled={loading}
             />
           </div>
-          <button type="submit" className="auth-btn" disabled={loading}>
-            {loading ? 'Signing in...' : 'Sign In'}
+
+          {/* Submit */}
+          <button
+            type="submit"
+            className="auth-btn"
+            disabled={loading}
+          >
+            {loading
+              ? 'Signing in...'
+              : 'Sign In'}
           </button>
+
         </form>
+
+        {/* Register */}
         <div className="auth-footer">
-          <span>Don't have an account?</span>
-          <button className="link-btn" onClick={onSwitchToRegister}>
+          <span>
+            Don't have an account?
+          </span>
+
+          <button
+            type="button"
+            className="link-btn"
+            onClick={onSwitchToRegister}
+            disabled={loading}
+          >
             Create one
           </button>
         </div>
+
       </div>
     </div>
   );
