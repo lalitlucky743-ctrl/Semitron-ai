@@ -109,6 +109,18 @@ groq_client = (
 
 
 # =========================================================
+# GROQ MODEL FALLBACK
+# =========================================================
+
+GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.6-27b",
+    "groq/compound-mini",
+]
+
+
+# =========================================================
 # PASSWORD HELPERS
 # =========================================================
 
@@ -604,8 +616,8 @@ async def chat(
         for message in history
     ]
 
-    # =====================================================
-    # GROQ AI
+     # =====================================================
+    # GROQ AI WITH AUTOMATIC MODEL FALLBACK
     # =====================================================
 
     if not groq_client:
@@ -615,29 +627,57 @@ async def chat(
             detail="GROQ_API_KEY is not configured."
         )
 
-    try:
+    reply = None
+    last_error = None
+    successful_model = None
 
-        response = groq_client.chat.completions.create(
+    for model_name in GROQ_MODELS:
 
-            # Model available through your Groq API key
-            model="openai/gpt-oss-120b",
+        try:
 
-            messages=messages_for_ai,
+            print(f"Trying Groq model: {model_name}")
 
-            temperature=0.7,
-        )
+            response = groq_client.chat.completions.create(
 
-        reply = response.choices[0].message.content
+                model=model_name,
 
-        if not reply:
+                messages=messages_for_ai,
 
-            reply = "I couldn't generate a response."
+                temperature=0.7,
+            )
 
-    except Exception as e:
+            generated_reply = response.choices[0].message.content
+
+            if generated_reply:
+
+                reply = generated_reply
+                successful_model = model_name
+
+                print(
+                    f"Groq model succeeded: {model_name}"
+                )
+
+                break
+
+        except Exception as e:
+
+            last_error = str(e)
+
+            print(
+                f"Groq model failed: {model_name} | {last_error}"
+            )
+
+            continue
+
+    # =====================================================
+    # ALL MODELS FAILED
+    # =====================================================
+
+    if reply is None:
 
         raise HTTPException(
-            status_code=500,
-            detail=f"Groq API error: {str(e)}"
+            status_code=503,
+            detail="AI service is temporarily unavailable. Please try again."
         )
 
     # =====================================================
