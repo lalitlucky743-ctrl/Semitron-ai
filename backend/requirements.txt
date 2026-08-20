@@ -7,3 +7,4 @@ bcrypt
 python-jose[cryptography]
 groq
 openai
+psycopg2-binary
