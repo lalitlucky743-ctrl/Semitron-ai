@@ -1,17 +1,37 @@
 import os
 import uuid
+
 import bcrypt
 
 from datetime import datetime, timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException, status
+
+from fastapi import (
+    FastAPI,
+    Depends,
+    HTTPException,
+    status,
+)
+
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+
+from fastapi.security import (
+    OAuth2PasswordBearer,
+    OAuth2PasswordRequestForm,
+)
+
 from groq import Groq
+
 from jose import JWTError, jwt
+
 from pydantic import BaseModel
+
+from sqlalchemy.orm import Session
+
+from database import Base, engine, get_db
+from models import User, Conversation, Message
 
 
 # =========================================================
@@ -19,6 +39,13 @@ from pydantic import BaseModel
 # =========================================================
 
 load_dotenv()
+
+
+# =========================================================
+# DATABASE
+# =========================================================
+
+Base.metadata.create_all(bind=engine)
 
 
 # =========================================================
@@ -64,6 +91,7 @@ if not SECRET_KEY:
     )
 
 ALGORITHM = "HS256"
+
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 
@@ -78,13 +106,6 @@ groq_client = (
     if GROQ_API_KEY
     else None
 )
-
-
-# =========================================================
-# TEMPORARY IN-MEMORY STORAGE
-# =========================================================
-
-users = {}
 
 
 # =========================================================
@@ -133,8 +154,11 @@ def create_access_token(
     to_encode = data.copy()
 
     if expires_delta:
+
         expire = datetime.utcnow() + expires_delta
+
     else:
+
         expire = datetime.utcnow() + timedelta(
             minutes=ACCESS_TOKEN_EXPIRE_MINUTES
         )
@@ -157,7 +181,8 @@ def create_access_token(
 # =========================================================
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme)
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
 ):
 
     credentials_exception = HTTPException(
@@ -185,7 +210,11 @@ async def get_current_user(
 
         raise credentials_exception
 
-    user = users.get(username)
+    user = (
+        db.query(User)
+        .filter(User.username == username)
+        .first()
+    )
 
     if user is None:
         raise credentials_exception
@@ -194,26 +223,34 @@ async def get_current_user(
 
 
 # =========================================================
-# MODELS
+# SCHEMAS
 # =========================================================
 
 class UserRegister(BaseModel):
+
     username: str
+
     password: str
 
 
 class Token(BaseModel):
+
     access_token: str
+
     token_type: str
 
 
 class ChatRequest(BaseModel):
+
     message: str
+
     conversation_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
+
     reply: str
+
     conversation_id: str
 
 
@@ -235,9 +272,11 @@ async def root():
     methods=["GET", "HEAD"]
 )
 async def health():
+
     return {
         "status": "healthy"
     }
+
 
 # =========================================================
 # REGISTER
@@ -247,17 +286,27 @@ async def health():
     "/api/register",
     response_model=Token
 )
-async def register(user: UserRegister):
+async def register(
+    user: UserRegister,
+    db: Session = Depends(get_db)
+):
 
     username = user.username.strip()
 
     if not username:
+
         raise HTTPException(
             status_code=400,
             detail="Username cannot be empty"
         )
 
-    if username in users:
+    existing_user = (
+        db.query(User)
+        .filter(User.username == username)
+        .first()
+    )
+
+    if existing_user:
 
         raise HTTPException(
             status_code=400,
@@ -277,18 +326,20 @@ async def register(user: UserRegister):
             detail=str(e)
         )
 
-    user_id = str(uuid.uuid4())
+    new_user = User(
+        username=username,
+        hashed_password=hashed_password
+    )
 
-    users[username] = {
-        "user_id": user_id,
-        "password_hash": hashed_password,
-        "conversations": {},
-        "messages": {},
-    }
+    db.add(new_user)
+
+    db.commit()
+
+    db.refresh(new_user)
 
     access_token = create_access_token(
         data={
-            "sub": username
+            "sub": new_user.username
         }
     )
 
@@ -307,12 +358,17 @@ async def register(user: UserRegister):
     response_model=Token
 )
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends()
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
 ):
 
     username = form_data.username.strip()
 
-    user = users.get(username)
+    user = (
+        db.query(User)
+        .filter(User.username == username)
+        .first()
+    )
 
     if not user:
 
@@ -323,7 +379,7 @@ async def login(
 
     if not verify_password(
         form_data.password,
-        user["password_hash"]
+        user.hashed_password
     ):
 
         raise HTTPException(
@@ -333,7 +389,7 @@ async def login(
 
     access_token = create_access_token(
         data={
-            "sub": username
+            "sub": user.username
         }
     )
 
@@ -349,60 +405,111 @@ async def login(
 
 @app.get("/api/conversations")
 async def get_conversations(
-    current_user: dict = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
 
-    conversations = current_user["conversations"]
+    conversations = (
+        db.query(Conversation)
+        .filter(
+            Conversation.user_id == current_user.id
+        )
+        .order_by(
+            Conversation.created_at.desc()
+        )
+        .all()
+    )
 
     return {
         "conversations": [
             {
-                "id": conversation_id,
-                "title": title
+                "id": conversation.id,
+                "title": conversation.title
             }
-            for conversation_id, title
-            in conversations.items()
+            for conversation in conversations
         ]
     }
 
 
+# =========================================================
+# CREATE CONVERSATION
+# =========================================================
+
 @app.post("/api/conversations")
 async def create_conversation(
     title: str = "New Chat",
-    current_user: dict = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
 
     conversation_id = str(uuid.uuid4())
 
-    current_user["conversations"][
-        conversation_id
-    ] = title
+    conversation = Conversation(
+        id=conversation_id,
+        user_id=current_user.id,
+        title=title
+    )
 
-    current_user["messages"][
-        conversation_id
-    ] = []
+    db.add(conversation)
+
+    db.commit()
+
+    db.refresh(conversation)
 
     return {
-        "id": conversation_id,
-        "title": title
+        "id": conversation.id,
+        "title": conversation.title
     }
 
+
+# =========================================================
+# GET MESSAGES
+# =========================================================
 
 @app.get(
     "/api/conversations/{conv_id}/messages"
 )
 async def get_messages(
     conv_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
 
-    messages = current_user["messages"].get(
-        conv_id,
-        []
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.id == conv_id,
+            Conversation.user_id == current_user.id
+        )
+        .first()
+    )
+
+    if conversation is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found"
+        )
+
+    messages = (
+        db.query(Message)
+        .filter(
+            Message.conversation_id == conv_id
+        )
+        .order_by(
+            Message.created_at.asc()
+        )
+        .all()
     )
 
     return {
-        "messages": messages
+        "messages": [
+            {
+                "role": message.role,
+                "content": message.content
+            }
+            for message in messages
+        ]
     }
 
 
@@ -416,42 +523,86 @@ async def get_messages(
 )
 async def chat(
     request: ChatRequest,
-    current_user: dict = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
 
     conversation_id = request.conversation_id
 
-    # Create new conversation if needed
+    # =====================================================
+    # CREATE NEW CONVERSATION
+    # =====================================================
+
     if not conversation_id:
 
         conversation_id = str(uuid.uuid4())
 
-        current_user["conversations"][
-            conversation_id
-        ] = "New Chat"
+        conversation = Conversation(
+            id=conversation_id,
+            user_id=current_user.id,
+            title="New Chat"
+        )
 
-        current_user["messages"][
-            conversation_id
-        ] = []
+        db.add(conversation)
 
-    # Make sure conversation exists
-    if conversation_id not in current_user["messages"]:
+        db.commit()
 
-        current_user["conversations"][
-            conversation_id
-        ] = "New Chat"
+    # =====================================================
+    # FIND EXISTING CONVERSATION
+    # =====================================================
 
-        current_user["messages"][
-            conversation_id
-        ] = []
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.id == conversation_id,
+            Conversation.user_id == current_user.id
+        )
+        .first()
+    )
 
-    # Add user message
-    current_user["messages"][
-        conversation_id
-    ].append({
-        "role": "user",
-        "content": request.message
-    })
+    if conversation is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found"
+        )
+
+    # =====================================================
+    # SAVE USER MESSAGE
+    # =====================================================
+
+    user_message = Message(
+        conversation_id=conversation_id,
+        role="user",
+        content=request.message
+    )
+
+    db.add(user_message)
+
+    db.commit()
+
+    # =====================================================
+    # LOAD CHAT HISTORY
+    # =====================================================
+
+    history = (
+        db.query(Message)
+        .filter(
+            Message.conversation_id == conversation_id
+        )
+        .order_by(
+            Message.created_at.asc()
+        )
+        .all()
+    )
+
+    messages_for_ai = [
+        {
+            "role": message.role,
+            "content": message.content
+        }
+        for message in history
+    ]
 
     # =====================================================
     # GROQ
@@ -465,9 +616,7 @@ async def chat(
 
                 model="llama-3.3-70b-versatile",
 
-                messages=current_user[
-                    "messages"
-                ][conversation_id],
+                messages=messages_for_ai,
 
                 temperature=0.7,
             )
@@ -487,13 +636,23 @@ async def chat(
             "(Groq API key missing)"
         )
 
-    # Add assistant response
-    current_user["messages"][
-        conversation_id
-    ].append({
-        "role": "assistant",
-        "content": reply
-    })
+    # =====================================================
+    # SAVE ASSISTANT MESSAGE
+    # =====================================================
+
+    assistant_message = Message(
+        conversation_id=conversation_id,
+        role="assistant",
+        content=reply
+    )
+
+    db.add(assistant_message)
+
+    db.commit()
+
+    # =====================================================
+    # RETURN
+    # =====================================================
 
     return ChatResponse(
         reply=reply,
