@@ -516,7 +516,39 @@ async def get_messages(
 # =========================================================
 # CHAT
 # =========================================================
+# =========================================================
+# GROQ MODELS DEBUG
+# =========================================================
 
+@app.get("/api/groq-models")
+async def groq_models():
+
+    if not groq_client:
+        raise HTTPException(
+            status_code=500,
+            detail="GROQ_API_KEY is missing"
+        )
+
+    try:
+
+        models = groq_client.models.list()
+
+        return {
+            "models": [
+                {
+                    "id": model.id,
+                    "active": getattr(model, "active", None)
+                }
+                for model in models.data
+            ]
+        }
+
+    except Exception as e:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 @app.post(
     "/api/chat",
     response_model=ChatResponse
@@ -635,6 +667,7 @@ async def chat(
             f"Echo: {request.message} "
             "(Groq API key missing)"
         )
+        
 
     # =====================================================
     # SAVE ASSISTANT MESSAGE
