@@ -400,7 +400,7 @@ async def login(
 
 
 # =========================================================
-# CONVERSATIONS
+# GET CONVERSATIONS
 # =========================================================
 
 @app.get("/api/conversations")
@@ -516,39 +516,7 @@ async def get_messages(
 # =========================================================
 # CHAT
 # =========================================================
-# =========================================================
-# GROQ MODELS DEBUG
-# =========================================================
 
-@app.get("/api/groq-models")
-async def groq_models():
-
-    if not groq_client:
-        raise HTTPException(
-            status_code=500,
-            detail="GROQ_API_KEY is missing"
-        )
-
-    try:
-
-        models = groq_client.models.list()
-
-        return {
-            "models": [
-                {
-                    "id": model.id,
-                    "active": getattr(model, "active", None)
-                }
-                for model in models.data
-            ]
-        }
-
-    except Exception as e:
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
 @app.post(
     "/api/chat",
     response_model=ChatResponse
@@ -637,37 +605,40 @@ async def chat(
     ]
 
     # =====================================================
-    # GROQ
+    # GROQ AI
     # =====================================================
 
-    if groq_client:
+    if not groq_client:
 
-        try:
-
-            response = groq_client.chat.completions.create(
-
-                model="llama-3.1-8b-instant",
-
-                messages=messages_for_ai,
-
-                temperature=0.7,
-            )
-
-            reply = response.choices[
-                0
-            ].message.content
-
-        except Exception as e:
-
-            reply = f"Groq error: {str(e)}"
-
-    else:
-
-        reply = (
-            f"Echo: {request.message} "
-            "(Groq API key missing)"
+        raise HTTPException(
+            status_code=500,
+            detail="GROQ_API_KEY is not configured."
         )
-        
+
+    try:
+
+        response = groq_client.chat.completions.create(
+
+            # Model available through your Groq API key
+            model="openai/gpt-oss-120b",
+
+            messages=messages_for_ai,
+
+            temperature=0.7,
+        )
+
+        reply = response.choices[0].message.content
+
+        if not reply:
+
+            reply = "I couldn't generate a response."
+
+    except Exception as e:
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Groq API error: {str(e)}"
+        )
 
     # =====================================================
     # SAVE ASSISTANT MESSAGE
